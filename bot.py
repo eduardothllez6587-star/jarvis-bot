@@ -4,22 +4,22 @@ import json
 import logging
 import requests
 import tempfile
-import threading
 from pathlib import Path
 from datetime import datetime
 
 import telebot
 
-# ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-# ── Config ───────────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
-MEMORY_FILE    = "memory.json"
-MODEL          = "llama-3.1-8b-instant"
-GROQ_URL       = "https://api.groq.com/openai/v1/chat/completions"
+TELEGRAM_TOKEN    = os.environ["TELEGRAM_TOKEN"]
+GROQ_API_KEY      = os.environ["GROQ_API_KEY"]
+ELEVENLABS_API_KEY = os.environ["ELEVENLABS_API_KEY"]
+ELEVENLABS_VOICE  = os.environ.get("ELEVENLABS_VOICE_ID", "4tRn1lSkEn13EVTuqb0g")
+MEMORY_FILE       = "memory.json"
+MODEL             = "llama-3.1-8b-instant"
+GROQ_URL          = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_AUDIO_URL    = "https://api.groq.com/openai/v1/audio/transcriptions"
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN)
 
@@ -77,7 +77,7 @@ SYSTEM_PROMPTS = {
     "director": (
         "Eres Jarvis, el asistente personal elite de Eduardo. "
         "Estilo J.A.R.V.I.S. de Tony Stark: inteligente, directo, ocasionalmente ingenioso, nunca verboso. "
-        "Siempre responde en español. "
+        "Siempre responde en español. Respuestas cortas y directas para mensajes de voz. "
         "Si el usuario menciona proyectos, tareas o preferencias importantes, termina tu respuesta con: "
         '<<<MEMORIA:{"tipo":"proyecto","dato":"descripcion breve"}>>>'
     ),
@@ -102,7 +102,7 @@ SYSTEM_PROMPTS = {
     ),
 }
 
-# ── Groq ──────────────────────────────────────────────────────────────────────
+# ── Groq texto ────────────────────────────────────────────────────────────────
 def ask_groq(agent, user_message, history, memory_items):
     system = SYSTEM_PROMPTS.get(agent, SYSTEM_PROMPTS["director"])
     if memory_items:
@@ -120,15 +120,54 @@ def ask_groq(agent, user_message, history, memory_items):
     data = response.json()
     return data["choices"][0]["message"]["content"].strip()
 
+# ── Groq audio (transcripción) ────────────────────────────────────────────────
+def transcribe_audio(audio_path):
+    with open(audio_path, "rb") as f:
+        response = requests.post(
+            GROQ_AUDIO_URL,
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            files={"file": (Path(audio_path).name, f, "audio/ogg")},
+            data={"model": "whisper-large-v3", "language": "es"},
+            timeout=30
+        )
+    data = response.json()
+    return data.get("text", "").strip()
+
+# ── ElevenLabs texto a voz ────────────────────────────────────────────────────
+def text_to_speech(text):
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}"
+    response = requests.post(
+        url,
+        headers={
+            "xi-api-key": ELEVENLABS_API_KEY,
+            "Content-Type": "application/json"
+        },
+        json={
+            "text": text,
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
+        },
+        timeout=30
+    )
+    if response.status_code == 200:
+        path = f"/tmp/jarvis_voice_{datetime.now().strftime('%H%M%S')}.mp3"
+        Path(path).write_bytes(response.content)
+        return path
+    return None
+
 # ── Imagen ────────────────────────────────────────────────────────────────────
 def generate_image(prompt):
-    encoded = requests.utils.quote(prompt)
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
-    r = requests.get(url, timeout=30)
-    if r.status_code == 200:
-        path = f"/tmp/jarvis_{datetime.now().strftime('%H%M%S')}.jpg"
-        Path(path).write_bytes(r.content)
-        return path
+    try:
+        encoded = requests.utils.quote(prompt)
+        seed = abs(hash(prompt)) % 99999
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}&model=flux"
+        r = requests.get(url, timeout=60)
+        if r.status_code == 200 and len(r.content) > 1000:
+            path = f"/tmp/jarvis_img_{datetime.now().strftime('%H%M%S')}.jpg"
+            Path(path).write_bytes(r.content)
+            return path
+    except Exception as e:
+        logger.error(f"Image error: {e}")
     return None
 
 # ── Crear Word ────────────────────────────────────────────────────────────────
@@ -212,6 +251,29 @@ def create_pptx(slides_json, filename="presentacion.pptx"):
         logger.error(f"PPTX error: {e}")
         return None
 
+# ── Procesar mensaje de texto o voz ──────────────────────────────────────────
+def process_message(user_id, text, respond_with_voice=False):
+    agent = detect_agent(text)
+    user_mem = get_user_memory(user_id)
+
+    try:
+        reply = ask_groq(agent, text, user_mem.get("history", []), user_mem.get("items", []))
+    except Exception as e:
+        logger.error(f"Groq error: {e}")
+        return None, None, "error"
+
+    user_mem.setdefault("history", [])
+    user_mem["history"].append({"role": "user", "content": text})
+    user_mem["history"].append({"role": "assistant", "content": reply})
+    user_mem["history"] = user_mem["history"][-40:]
+
+    clean_reply, mem_item = extract_memory_tag(reply)
+    if mem_item:
+        user_mem.setdefault("items", []).append(mem_item)
+    update_user_memory(user_id, user_mem)
+
+    return clean_reply, agent, reply
+
 # ── Handlers ──────────────────────────────────────────────────────────────────
 @bot.message_handler(commands=["start"])
 def start(message):
@@ -222,15 +284,70 @@ def start(message):
         "📄 Word — 'crea un documento sobre...'\n"
         "📊 Excel — 'haz una tabla con...'\n"
         "📊 PowerPoint — 'crea una presentación de...'\n"
-        "💬 Cualquier pregunta o tarea\n\n"
+        "🎤 Mensajes de voz — mándame un audio\n"
+        "💬 Cualquier pregunta\n\n"
         "¿En qué te ayudo?"
     )
 
+@bot.message_handler(content_types=["voice"])
+def handle_voice(message):
+    bot.send_chat_action(message.chat.id, "typing")
+    user_id = message.from_user.id
+
+    # Descargar audio
+    file_info = bot.get_file(message.voice.file_id)
+    downloaded = bot.download_file(file_info.file_path)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as f:
+        f.write(downloaded)
+        tmp_path = f.name
+
+    # Transcribir
+    try:
+        text = transcribe_audio(tmp_path)
+        Path(tmp_path).unlink(missing_ok=True)
+    except Exception as e:
+        logger.error(f"Transcription error: {e}")
+        bot.reply_to(message, "No pude entender el audio. Intenta de nuevo.")
+        return
+
+    if not text:
+        bot.reply_to(message, "No entendí el audio. Intenta hablar más claro.")
+        return
+
+    bot.reply_to(message, f"🎤 Escuché: _{text}_", parse_mode="Markdown")
+    bot.send_chat_action(message.chat.id, "typing")
+
+    clean_reply, agent, raw_reply = process_message(user_id, text, respond_with_voice=True)
+    if not clean_reply:
+        bot.reply_to(message, "Error procesando tu mensaje.")
+        return
+
+    if agent == "imagen":
+        bot.send_chat_action(message.chat.id, "upload_photo")
+        path = generate_image(raw_reply)
+        if path:
+            with open(path, "rb") as f:
+                bot.send_photo(message.chat.id, f, caption=f"Prompt: {raw_reply[:200]}")
+            Path(path).unlink(missing_ok=True)
+        else:
+            bot.reply_to(message, "No pude generar la imagen.")
+        return
+
+    # Responder con voz
+    bot.send_chat_action(message.chat.id, "record_audio")
+    voice_path = text_to_speech(clean_reply)
+    if voice_path:
+        with open(voice_path, "rb") as f:
+            bot.send_voice(message.chat.id, f)
+        Path(voice_path).unlink(missing_ok=True)
+    else:
+        bot.reply_to(message, clean_reply)
+
 @bot.message_handler(content_types=["text"])
 def handle_message(message):
-    user_id  = message.from_user.id
-    text     = message.text or ""
-    agent    = detect_agent(text)
+    user_id = message.from_user.id
+    text = message.text or ""
+    agent = detect_agent(text)
     user_mem = get_user_memory(user_id)
 
     bot.send_chat_action(message.chat.id, "typing")
@@ -252,7 +369,7 @@ def handle_message(message):
         path = generate_image(reply)
         if path:
             with open(path, "rb") as f:
-                bot.send_photo(message.chat.id, f, caption=f"Prompt: {reply[:200]}")
+                bot.send_photo(message.chat.id, f, caption=f"🎨 {reply[:200]}")
             Path(path).unlink(missing_ok=True)
         else:
             bot.reply_to(message, "No pude generar la imagen. Intenta con otra descripción.")
@@ -265,7 +382,7 @@ def handle_message(message):
         path = create_word_doc(clean_reply, fname)
         if path:
             with open(path, "rb") as f:
-                bot.send_document(message.chat.id, f, caption="Aquí está tu documento Word.")
+                bot.send_document(message.chat.id, f, caption="📄 Aquí está tu documento Word.")
             Path(path).unlink(missing_ok=True)
         else:
             bot.reply_to(message, clean_reply)
@@ -279,7 +396,7 @@ def handle_message(message):
         path = create_excel(reply, fname)
         if path:
             with open(path, "rb") as f:
-                bot.send_document(message.chat.id, f, caption="Aquí está tu Excel.")
+                bot.send_document(message.chat.id, f, caption="📊 Aquí está tu Excel.")
             Path(path).unlink(missing_ok=True)
         else:
             bot.reply_to(message, reply)
@@ -291,7 +408,7 @@ def handle_message(message):
         path = create_pptx(reply, fname)
         if path:
             with open(path, "rb") as f:
-                bot.send_document(message.chat.id, f, caption="Aquí está tu presentación.")
+                bot.send_document(message.chat.id, f, caption="📊 Aquí está tu presentación.")
             Path(path).unlink(missing_ok=True)
         else:
             bot.reply_to(message, reply)
@@ -310,7 +427,6 @@ def handle_document(message):
     file_info = bot.get_file(doc.file_id)
     downloaded = bot.download_file(file_info.file_path)
     suffix = Path(doc.file_name).suffix
-
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
         f.write(downloaded)
         tmp_path = f.name
