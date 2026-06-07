@@ -7,8 +7,10 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
-from telegram import Update
-from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, FSInputFile
+from aiogram.filters import CommandStart
+import asyncio
 
 # ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -20,6 +22,9 @@ GROQ_API_KEY   = os.environ["GROQ_API_KEY"]
 MEMORY_FILE    = "memory.json"
 MODEL          = "llama-3.1-8b-instant"
 GROQ_URL       = "https://api.groq.com/openai/v1/chat/completions"
+
+bot = Bot(token=TELEGRAM_TOKEN)
+dp  = Dispatcher()
 
 # ── Memoria ───────────────────────────────────────────────────────────────────
 def load_memory():
@@ -58,7 +63,7 @@ def detect_agent(text):
     t = text.lower()
     if any(w in t for w in ["imagen", "foto", "dibuja", "genera", "pinta", "anime", "ilustra"]):
         return "imagen"
-    if any(w in t for w in ["codigo", "código", "python", "programar", "script", "función", "funcion", "bug"]):
+    if any(w in t for w in ["codigo", "código", "python", "programar", "script", "funcion", "función", "bug"]):
         return "codigo"
     if any(w in t for w in ["escribe", "historia", "cuento", "poema", "redacta", "carta", "correo", "email"]):
         return "escribe"
@@ -100,7 +105,7 @@ SYSTEM_PROMPTS = {
     ),
 }
 
-# ── Groq via requests ─────────────────────────────────────────────────────────
+# ── Groq ──────────────────────────────────────────────────────────────────────
 def ask_groq(agent, user_message, history, memory_items):
     system = SYSTEM_PROMPTS.get(agent, SYSTEM_PROMPTS["director"])
     if memory_items:
@@ -113,31 +118,28 @@ def ask_groq(agent, user_message, history, memory_items):
 
     response = requests.post(
         GROQ_URL,
-        headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": MODEL,
-            "messages": messages,
-            "temperature": 0.7,
-            "max_tokens": 2048,
-        },
+        headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
+        json={"model": MODEL, "messages": messages, "temperature": 0.7, "max_tokens": 2048},
         timeout=30
     )
     data = response.json()
     return data["choices"][0]["message"]["content"].strip()
 
 # ── Imagen ────────────────────────────────────────────────────────────────────
-def generate_image_url(prompt):
+def generate_image(prompt):
     encoded = requests.utils.quote(prompt)
-    return f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
+    r = requests.get(url, timeout=30)
+    if r.status_code == 200:
+        path = f"/tmp/jarvis_{datetime.now().strftime('%H%M%S')}.jpg"
+        Path(path).write_bytes(r.content)
+        return path
+    return None
 
 # ── Crear Word ────────────────────────────────────────────────────────────────
 def create_word_doc(content, filename="documento.docx"):
     try:
         from docx import Document
-        from docx.shared import Pt
         doc = Document()
         for line in content.split("\n"):
             line = line.strip()
@@ -189,7 +191,7 @@ def create_excel(csv_content, filename="datos.xlsx"):
 def create_pptx(slides_json, filename="presentacion.pptx"):
     try:
         from pptx import Presentation
-        from pptx.util import Inches, Pt
+        from pptx.util import Pt
         from pptx.dml.color import RGBColor
         slides_data = json.loads(slides_json)
         prs = Presentation()
@@ -216,8 +218,9 @@ def create_pptx(slides_json, filename="presentacion.pptx"):
         return None
 
 # ── Handlers ──────────────────────────────────────────────────────────────────
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
+@dp.message(CommandStart())
+async def start(message: Message):
+    await message.answer(
         "👋 Hola Eduardo, soy Jarvis.\n\n"
         "Puedo ayudarte con:\n"
         "🖼 Imágenes — 'genera una imagen de...'\n"
@@ -228,43 +231,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "¿En qué te ayudo?"
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    message = update.message.text or ""
-    agent = detect_agent(message)
+@dp.message(F.text)
+async def handle_message(message: Message):
+    user_id  = message.from_user.id
+    text     = message.text or ""
+    agent    = detect_agent(text)
     user_mem = get_user_memory(user_id)
 
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
 
     try:
-        reply = ask_groq(agent, message, user_mem.get("history", []), user_mem.get("items", []))
+        reply = ask_groq(agent, text, user_mem.get("history", []), user_mem.get("items", []))
     except Exception as e:
         logger.error(f"Groq error: {e}")
-        await update.message.reply_text("Error al contactar la IA. Intenta de nuevo.")
+        await message.answer("Error al contactar la IA. Intenta de nuevo.")
         return
 
     user_mem.setdefault("history", [])
-    user_mem["history"].append({"role": "user", "content": message})
+    user_mem["history"].append({"role": "user", "content": text})
     user_mem["history"].append({"role": "assistant", "content": reply})
     user_mem["history"] = user_mem["history"][-40:]
 
     if agent == "imagen":
-        image_url = generate_image_url(reply)
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
-        try:
-            img_response = requests.get(image_url, timeout=30)
-            if img_response.status_code == 200:
-                with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as f:
-                    f.write(img_response.content)
-                    tmp_path = f.name
-                with open(tmp_path, "rb") as f:
-                    await update.message.reply_photo(photo=f, caption=f"Prompt: {reply[:200]}")
-                Path(tmp_path).unlink(missing_ok=True)
-            else:
-                await update.message.reply_text("No pude generar la imagen. Intenta con otra descripción.")
-        except Exception as e:
-            logger.error(f"Image error: {e}")
-            await update.message.reply_text("Error generando imagen.")
+        await bot.send_chat_action(chat_id=message.chat.id, action="upload_photo")
+        path = generate_image(reply)
+        if path:
+            await message.answer_photo(FSInputFile(path), caption=f"Prompt: {reply[:200]}")
+            Path(path).unlink(missing_ok=True)
+        else:
+            await message.answer("No pude generar la imagen. Intenta con otra descripción.")
         update_user_memory(user_id, user_mem)
         return
 
@@ -273,11 +268,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fname = f"Jarvis_{datetime.now().strftime('%Y%m%d_%H%M')}.docx"
         path = create_word_doc(clean_reply, fname)
         if path:
-            with open(path, "rb") as f:
-                await update.message.reply_document(document=f, filename=fname, caption="Aquí está tu documento Word.")
+            await message.answer_document(FSInputFile(path), caption="Aquí está tu documento Word.")
             Path(path).unlink(missing_ok=True)
         else:
-            await update.message.reply_text(clean_reply)
+            await message.answer(clean_reply)
         if mem_item:
             user_mem.setdefault("items", []).append(mem_item)
         update_user_memory(user_id, user_mem)
@@ -287,11 +281,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fname = f"Jarvis_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
         path = create_excel(reply, fname)
         if path:
-            with open(path, "rb") as f:
-                await update.message.reply_document(document=f, filename=fname, caption="Aquí está tu Excel.")
+            await message.answer_document(FSInputFile(path), caption="Aquí está tu Excel.")
             Path(path).unlink(missing_ok=True)
         else:
-            await update.message.reply_text(reply)
+            await message.answer(reply)
         update_user_memory(user_id, user_mem)
         return
 
@@ -299,11 +292,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fname = f"Jarvis_{datetime.now().strftime('%Y%m%d_%H%M')}.pptx"
         path = create_pptx(reply, fname)
         if path:
-            with open(path, "rb") as f:
-                await update.message.reply_document(document=f, filename=fname, caption="Aquí está tu presentación.")
+            await message.answer_document(FSInputFile(path), caption="Aquí está tu presentación.")
             Path(path).unlink(missing_ok=True)
         else:
-            await update.message.reply_text(reply)
+            await message.answer(reply)
         update_user_memory(user_id, user_mem)
         return
 
@@ -311,16 +303,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if mem_item:
         user_mem.setdefault("items", []).append(mem_item)
     update_user_memory(user_id, user_mem)
-    await update.message.reply_text(clean_reply)
+    await message.answer(clean_reply)
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    doc = update.message.document
-    file = await context.bot.get_file(doc.file_id)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(doc.file_name).suffix) as f:
-        await file.download_to_drive(f.name)
+@dp.message(F.document)
+async def handle_document(message: Message):
+    doc = message.document
+    file = await bot.get_file(doc.file_id)
+    suffix = Path(doc.file_name).suffix
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
+        await bot.download_file(file.file_path, f.name)
         tmp_path = f.name
 
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    await bot.send_chat_action(chat_id=message.chat.id, action="typing")
     content = ""
     try:
         if doc.file_name.endswith(".txt"):
@@ -334,32 +328,28 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             d = Document(tmp_path)
             content = "\n".join(p.text for p in d.paragraphs)[:4000]
     except Exception as e:
-        logger.error(f"Doc read error: {e}")
+        logger.error(f"Doc error: {e}")
 
     Path(tmp_path).unlink(missing_ok=True)
 
     if not content:
-        await update.message.reply_text("Recibí el archivo pero no pude leer su contenido. Intenta con .txt, .pdf o .docx.")
+        await message.answer("Recibí el archivo pero no pude leerlo. Intenta con .txt, .pdf o .docx.")
         return
 
-    user_id = update.effective_user.id
+    user_id = message.from_user.id
     user_mem = get_user_memory(user_id)
-    prompt = f"El usuario envió el archivo '{doc.file_name}'. Contenido:\n\n{content}\n\nResúmelo y pregunta qué quiere hacer."
+    prompt = f"El usuario envió '{doc.file_name}'. Contenido:\n\n{content}\n\nResúmelo y pregunta qué quiere hacer."
     try:
         reply = ask_groq("director", prompt, user_mem.get("history", []), user_mem.get("items", []))
         clean_reply, _ = extract_memory_tag(reply)
-        await update.message.reply_text(clean_reply)
+        await message.answer(clean_reply)
     except Exception as e:
-        await update.message.reply_text("Error procesando el documento.")
+        await message.answer("Error procesando el documento.")
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+async def main():
     logger.info("Jarvis iniciado ✅")
-    app.run_polling(drop_pending_updates=True)
+    await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
