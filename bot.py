@@ -44,15 +44,8 @@ def update_user_memory(user_id: int, user_mem: dict):
     mem[str(user_id)] = user_mem
     save_memory(mem)
 
-def extract_memory_tag(text: str) -> tuple[str, dict | None]:
-    """Extrae <<<MEMORIA:{...}>>> del texto si existe."""python-telegram-bot==20.7
-groq==0.4.2
-requests==2.31.0
-python-docx==1.1.0
-openpyxl==3.1.2
-python-pptx==0.6.23
-pdfplumber==0.10.3
-
+def extract_memory_tag(text: str):
+    """Extrae <<<MEMORIA:{...}>>> del texto si existe."""
     match = re.search(r"<<<MEMORIA:(\{.*?\})>>>", text, re.DOTALL)
     if match:
         try:
