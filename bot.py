@@ -148,17 +148,21 @@ def text_to_speech(text):
 # ── Imagen ────────────────────────────────────────────────────────────────────
 def generate_image(prompt):
     try:
-        # Intentar con Pollinations primero
-        encoded = requests.utils.quote(prompt)
-        seed = abs(hash(prompt)) % 99999
-        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}&model=flux"
-        r = requests.get(url, timeout=90, headers={"User-Agent": "Mozilla/5.0"})
-        if r.status_code == 200 and len(r.content) > 5000:
+        HF_TOKEN = os.environ.get("HF_TOKEN", "")
+        API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+        response = requests.post(
+            API_URL,
+            headers=headers,
+            json={"inputs": prompt},
+            timeout=60
+        )
+        logger.info(f"HF status: {response.status_code}")
+        if response.status_code == 200:
             path = f"/tmp/jarvis_img_{datetime.now().strftime('%H%M%S')}.jpg"
-            Path(path).write_bytes(r.content)
-            logger.info(f"Imagen generada: {len(r.content)} bytes")
+            Path(path).write_bytes(response.content)
             return path
-        logger.error(f"Pollinations fallo: {r.status_code} {len(r.content)} bytes")
+        logger.error(f"HF error: {response.text[:200]}")
     except Exception as e:
         logger.error(f"Image error: {e}")
     return None
