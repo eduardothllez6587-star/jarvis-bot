@@ -135,46 +135,15 @@ def transcribe_audio(audio_path):
 
 # ── ElevenLabs texto a voz ────────────────────────────────────────────────────
 def text_to_speech(text):
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}"
-    response = requests.post(
-        url,
-        headers={
-            "xi-api-key": ELEVENLABS_API_KEY,
-            "Content-Type": "application/json"
-        },
-        json={
-            "text": text,
-            "model_id": "eleven_multilingual_v2",
-            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
-        },
-        timeout=30
-    )
-    logger.info(f"ElevenLabs status: {response.status_code}")
-    logger.info(f"ElevenLabs response: {response.text[:200]}")
-    if response.status_code == 200:
+    try:
+        from gtts import gTTS
+        tts = gTTS(text=text, lang='es', slow=False)
         path = f"/tmp/jarvis_voice_{datetime.now().strftime('%H%M%S')}.mp3"
-        Path(path).write_bytes(response.content)
+        tts.save(path)
         return path
-    return None
-    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}"
-    response = requests.post(
-        url,
-        headers={
-            "xi-api-key": ELEVENLABS_API_KEY,
-            "Content-Type": "application/json"
-        },
-        json={
-            "text": text,
-            "model_id": "eleven_multilingual_v2",
-            "voice_settings": {"stability": 0.5, "similarity_boost": 0.75}
-        },
-        timeout=30
-    )
-    if response.status_code == 200:
-        path = f"/tmp/jarvis_voice_{datetime.now().strftime('%H%M%S')}.mp3"
-        Path(path).write_bytes(response.content)
-        return path
-    return None
+    except Exception as e:
+        logger.error(f"gTTS error: {e}")
+        return None
 
 # ── Imagen ────────────────────────────────────────────────────────────────────
 def generate_image(prompt):
