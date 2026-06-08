@@ -146,26 +146,10 @@ def text_to_speech(text):
         return None
 
 # ── Imagen ────────────────────────────────────────────────────────────────────
-def generate_image(prompt):
-    try:
-        HF_TOKEN = os.environ.get("HF_TOKEN", "")
-        API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
-        headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-        response = requests.post(
-            API_URL,
-            headers=headers,
-            json={"inputs": prompt},
-            timeout=60
-        )
-        logger.info(f"HF status: {response.status_code}")
-        if response.status_code == 200:
-            path = f"/tmp/jarvis_img_{datetime.now().strftime('%H%M%S')}.jpg"
-            Path(path).write_bytes(response.content)
-            return path
-        logger.error(f"HF error: {response.text[:200]}")
-    except Exception as e:
-        logger.error(f"Image error: {e}")
-    return None
+def generate_image_url(prompt):
+    encoded = requests.utils.quote(prompt)
+    seed = abs(hash(prompt)) % 99999
+    return f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}&model=flux"
 
 # ── Crear Word ────────────────────────────────────────────────────────────────
 def create_word_doc(content, filename="documento.docx"):
@@ -361,17 +345,11 @@ def handle_message(message):
     user_mem["history"].append({"role": "assistant", "content": reply})
     user_mem["history"] = user_mem["history"][-40:]
 
-    if agent == "imagen":
-        bot.send_chat_action(message.chat.id, "upload_photo")
-        path = generate_image(reply)
-        if path:
-            with open(path, "rb") as f:
-                bot.send_photo(message.chat.id, f, caption=f"🎨 {reply[:200]}")
-            Path(path).unlink(missing_ok=True)
-        else:
-            bot.reply_to(message, "No pude generar la imagen. Intenta con otra descripción.")
-        update_user_memory(user_id, user_mem)
-        return
+  if agent == "imagen":
+    url = generate_image_url(reply)
+    bot.reply_to(message, f"🎨 *Aquí está tu imagen:*\n{url}\n\n_Prompt: {reply[:150]}_", parse_mode="Markdown")
+    update_user_memory(user_id, user_mem)
+    return
 
     if agent == "word":
         clean_reply, mem_item = extract_memory_tag(reply)
