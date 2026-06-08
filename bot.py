@@ -150,9 +150,9 @@ def generate_image(prompt):
     try:
         encoded = requests.utils.quote(prompt)
         seed = abs(hash(prompt)) % 99999
-        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}&model=flux"
-        r = requests.get(url, timeout=60)
-        if r.status_code == 200 and len(r.content) > 1000:
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}&model=flux-pro&enhance=true&private=true"
+        r = requests.get(url, timeout=90)
+        if r.status_code == 200 and len(r.content) > 5000:
             path = f"/tmp/jarvis_img_{datetime.now().strftime('%H%M%S')}.jpg"
             Path(path).write_bytes(r.content)
             return path
