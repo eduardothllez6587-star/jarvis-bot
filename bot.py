@@ -148,14 +148,17 @@ def text_to_speech(text):
 # ── Imagen ────────────────────────────────────────────────────────────────────
 def generate_image(prompt):
     try:
+        # Intentar con Pollinations primero
         encoded = requests.utils.quote(prompt)
         seed = abs(hash(prompt)) % 99999
-        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}&model=flux-pro&enhance=true&private=true"
-        r = requests.get(url, timeout=90)
+        url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&seed={seed}&model=flux"
+        r = requests.get(url, timeout=90, headers={"User-Agent": "Mozilla/5.0"})
         if r.status_code == 200 and len(r.content) > 5000:
             path = f"/tmp/jarvis_img_{datetime.now().strftime('%H%M%S')}.jpg"
             Path(path).write_bytes(r.content)
+            logger.info(f"Imagen generada: {len(r.content)} bytes")
             return path
+        logger.error(f"Pollinations fallo: {r.status_code} {len(r.content)} bytes")
     except Exception as e:
         logger.error(f"Image error: {e}")
     return None
